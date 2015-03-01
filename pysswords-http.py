@@ -1,18 +1,16 @@
+import argparse
 import json
 import os
 
+import gnupg
 from flask import Flask
 from flask.ext.restful import Api, abort, reqparse, Resource
 from pysswords.db import Database as PysswordsDatabase, DatabaseExistsError
 from pysswords.db.credential import CredentialNotFoundError
 
 
-parser = reqparse.RequestParser()
-parser.add_argument('database', type=str)
-parser.add_argument('name', type=str)
-parser.add_argument('login', type=str)
-parser.add_argument('password', type=str)
-parser.add_argument('comment', type=str)
+passphrase = None
+db = None
 
 
 def open_db(path):
@@ -40,21 +38,16 @@ def open_credentials(db, credential_name):
 
 
 class Credential(Resource):
-    def get(self, name):
-	args = parser.parse_args()
-        db_path = args['database']
-        if db_path is None:
-            db_path = os.expanduser('~/.pysswords')
+    parser = reqparse.RequestParser()
+    parser.add_argument('login', type=str)
+    parser.add_argument('password', type=str)
+    parser.add_argument('comment', type=str)
 
-        db = open_db(db_path)
-        if db is None:
-            msg = "Database {} doesn't exist".format(db_path)
-            return msg, 404
-        
+    def get(self, name):
         credentials = open_credentials(db, name)
         if credentials is None:
             msg = "No credentials found for name: {}".format(name)
-	    return msg, 404
+            return msg, 404
 
         response = []
         for credential in credentials:
@@ -63,23 +56,24 @@ class Credential(Resource):
                 'login': credential.login,
                 'password': credential.password,
                 'comment': credential.comment})
-	return json.dumps(response), 200
-        
+        return json.dumps(response), 200
+
     def put(self, name):
-        args = parser.parse_args()
-        db_path = args['database']
+        global passphrase, db
+
+        args = self.parser.parse_args()
         login = args['login']
         password = args['password']
         comment = args['comment']
 
-        db = open_db(db_path)
-        if db is None:
-            msg = "Database {} doesn't exist".format(db_path)
-            return msg, 404
+        password = db.decrypt(password, passphrase)
 
         db.add(name, login, password, comment)
-        return json.dumps({'name': name, 'login': login,
-            'password': password, 'comment': comment}), 201
+        return json.dumps({
+                'name': name,
+                'login': login,
+                'password': password,
+                'comment': comment}), 201
 
 
 app = Flask(__name__)
@@ -87,6 +81,23 @@ api = Api(app)
 api.add_resource(Credential, '/credentials/<string:name>')
 
 
+def main():
+    global db, passphrase
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument('passphrase',
+                        help='The passphrase used to encrypt and decrypt passwords')
+    parser.add_argument('-D', '--database', default=os.path.expanduser('~/.pysswords'),
+                        help='Specify the path to the pysswords database')
+    parser.add_argument('-p', '--port', default=5000,
+                        help='Specify which port the API should listen on')
+    args = parser.parse_args()
+
+    passphrase = args.passphrase
+    db = open_db(args.database)
+    app.run(debug=True, port=args.port)
+
+
 if __name__ == '__main__':
-    app.run(debug=True)
+    main()
 
